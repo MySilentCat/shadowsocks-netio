@@ -13,13 +13,13 @@ int str_sockaddr(const struct sockaddr *addr, ADDRESS *addr_s) {
     switch (addr->sa_family) {
     case AF_INET:
         in = (const struct sockaddr_in *)addr;
-        CHECK(0 == uv_ip4_name(in, addr_s->ip, sizeof(addr_s->ip)));
+        CHECK(0 == uv_ip4_name(in, addr_s->host, sizeof(addr_s->host)));
         addr_s->port = htons_u(in->sin_port);
 
         break;
     case AF_INET6:
         in6 = (const struct sockaddr_in6 *)&addr;
-        CHECK(0 == uv_ip6_name(in6, addr_s->ip, sizeof(addr_s->ip)));
+        CHECK(0 == uv_ip6_name(in6, addr_s->host, sizeof(addr_s->host)));
         addr_s->port = htons_u(in6->sin6_port);
 
         break;

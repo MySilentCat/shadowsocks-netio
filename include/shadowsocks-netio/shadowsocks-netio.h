@@ -11,6 +11,7 @@
 extern "C" {
 #endif
 
+#define DEFAULT_MEMORY_BLOCK_SIZE       10240
 
 #define DEFAULT_SERVER_BIND_HOST        ("0.0.0.0")
 #define DEFAULT_SERVER_BIND_PORT        (14450)
@@ -20,22 +21,30 @@ extern "C" {
 #define DEFAULT_CLIENT_BIND_PORT        (14550)
 #define DEFAULT_CLIENT_IDEL_TIMEOUT     (60 * 1000)
 
-#define STREAM_UP       1
-#define STREAM_DOWN     2
+enum {
+    STREAM_UP,      /* local -> remote */
+    STREAM_DOWN     /* remote -> local */
+};
+
+enum {
+    ACTION_ACCEPT,
+    ACTION_REJECT
+};
 
 typedef struct SSNETIO_BUF{
     char *buf_base;
     size_t buf_len;
+    size_t data_len;
 }SSNETIO_BUF;
 
 typedef struct ADDRESS{
-    char ip[INET6_ADDRSTRLEN + 1];
+    char host[64];      /* HostName or IpAddress */
     unsigned short port;
 }ADDRESS;
 
 typedef struct ADDRESS_PAIR{
-    ADDRESS local;
-    ADDRESS remote;
+    ADDRESS *local;
+    ADDRESS *remote;
 }ADDRESS_PAIR;
 
 typedef struct SSNETIO_CONFIG{
@@ -43,14 +52,6 @@ typedef struct SSNETIO_CONFIG{
     unsigned short bind_port;
     unsigned int idel_timeout;
 }SSNETIO_CONFIG;
-
-
-/* 正常转发 */
-#define ACTION_NONE             1
-/* 丢包 */
-#define ACTION_REJECT           2
-/* 继续接收数据 */
-#define ACTION_NEEDMORE         3
 
 typedef struct SSNETIO_SERVER_CALLBACKS{
     /* Event Notify, Can be NULL */
@@ -60,31 +61,32 @@ typedef struct SSNETIO_SERVER_CALLBACKS{
 
     void (*on_connection_made)(ADDRESS_PAIR *addr, void *data);
 
-    void (*on_connection_lost)(ADDRESS_PAIR *addr, void *data);
-
     /* A new request coming,
      * Set accept to 0 to reject,
      * set data to a context associate with this session
      * */
-    void (*on_new_session)(ADDRESS *addr, int *accept, void **data);
-
+    void (*on_new_session)(ADDRESS *addr, void **data);
+    void (*on_session_teardown)(void *data);
 
 
     /* Data Event, CANNOT be NULL */
 
     /* When data incoming, on_data_recv will be called,
      * buf contains the data received, before on_data_recv return,
-     * new_buf should be filled with the decrypted data.
+     * new_buf should be filled with the encrypted/decrypted data.
      *
      * on_free_mem will be called when the buf in new_buf is no longer used.
      *
-     * NOTE: if buf and new_buf has same buf_base (means data does not need to be decrypted),
+     * NOTE: if buf and new_buf has same buf_base (means data does not need to be encrypt/decrypt),
      *       on_free_mem will NOT be called twice on it.
      */
-    int (*on_data_recv)(SSNETIO_BUF *buf, SSNETIO_BUF *new_buf, void *data);
+    int (*on_data_recv)(SSNETIO_BUF *buf, SSNETIO_BUF *new_buf, int direct, void *data);
+
+    /* Parse the host/ip and port from incoming data. Set data_offset to actual data offset within buf */
+    int (*on_parse_addr)(ADDRESS *addr, SSNETIO_BUF *buf, int *data_offset, void *data);
 
     /* Alloc/Free memory for recv operation */
-    void (*on_alloc_mem)(SSNETIO_BUF *buf, void *data);
+    int (*on_alloc_mem)(SSNETIO_BUF *buf, size_t size, void *data);
     void (*on_free_mem)(SSNETIO_BUF *buf, void *data);
 }SSNETIO_SERVER_CALLBACKS;
 

@@ -6,14 +6,11 @@
 #define SHADOWSOCKS_NETIO_INTERNAL_H
 
 #include <assert.h>
-#include "../program/s5.h"
-
+#include "shadowsocks-netio/shadowsocks-netio.h"
+#include "uv.h"
 /* Session states. */
 enum sess_state {
     s_handshake,        /* Wait for client handshake. */
-    s_auth_start,       /* Start auth username password */
-    s_req_start,        /* Start waiting for request data. */
-    s_req_parse,        /* Wait for request data. */
     s_req_lookup,       /* Wait for upstream hostname DNS lookup to complete. */
     s_req_connect,      /* Wait for uv_tcp_connect() to complete. */
     s_proxy_start,      /* Connected. Start piping data. */
@@ -66,12 +63,16 @@ typedef struct {
         struct sockaddr addr;
     } t;
 
+    ADDRESS peer;
     SSNETIO_BUF ss_buf;
+    int data_offset;    /* Only used by the first packet */
 } CONN;
 
 typedef struct PROXY_NODE {
     int state;
     unsigned int index;
+    uv_loop_t *loop;
+
     CONN incoming;  /* Connection with the SOCKS client. */
     CONN outgoing;  /* Connection with upstream. */
     int outstanding;
@@ -129,6 +130,9 @@ if ( !(value) )                                         \
                             (((x) & 0xff000000) >> 24u) )
 #define htonl_u(x)          ntohl_u(x)
 
+
+#define CONTAINER_OF(ptr, type, field)                                        \
+  ((type *) ((char *) (ptr) - ((char *) &((type *) 0)->field)))
 
 /* URIL.C */
 int str_sockaddr(const struct sockaddr *addr, ADDRESS *addr_s);

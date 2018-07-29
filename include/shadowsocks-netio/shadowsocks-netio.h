@@ -62,7 +62,6 @@ typedef struct SSNETIO_SERVER_CALLBACKS{
     void (*on_connection_made)(ADDRESS_PAIR *addr, void *data);
 
     /* A new request coming,
-     * Set accept to 0 to reject,
      * set data to a context associate with this session
      * */
     void (*on_new_session)(ADDRESS *addr, void **data);

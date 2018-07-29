@@ -324,11 +324,6 @@ static void conn_write_done(uv_write_t *req, int status) {
     CONN *c;
     CONN *p;
 
-    /* Mabye it's the last step to clear */
-//    if (status == UV_ECANCELED) {
-//        return;  /* Handle has been closed. */
-//    }
-
     c = CONTAINER_OF(req, CONN, write_req);
     c->pn->outstanding--;
     ASSERT(c->wrstate == c_busy);
@@ -367,19 +362,18 @@ static void conn_getaddrinfo_done(
     }
 
     uv_freeaddrinfo(ai);
+
+    incoming->pn->outstanding--;
     do_next(incoming->pn);
 }
 
 static void conn_connect_done(uv_connect_t *req, int status) {
     CONN *c;
 
-    if ( status == UV_ECANCELED ) {
-        return;  /* Handle has been closed. */
-    }
-
     c = CONTAINER_OF(req, CONN, t.connect_req);
     c->result = status;
 
+    c->pn->outstanding--;
     do_next(c->pn);
 }
 
@@ -450,9 +444,28 @@ static void conn_timer_reset(CONN *c) {
 
 static void conn_timer_expire(uv_timer_t *handle) {
     CONN *c;
+    CONN *incoming;
+    CONN *outgoing;
 
     c = CONTAINER_OF(handle, CONN, timer_handle);
-    c->result = UV_ETIMEDOUT;
+
+    incoming = &c->pn->incoming;
+    outgoing = &c->pn->outgoing;
+
+    switch ( c->pn->state ) {
+    case s_handshake:
+        ASSERT(c == incoming);
+        incoming->result = UV_ETIMEDOUT;
+        break;
+    case s_req_lookup:
+    case s_req_connect:
+    case s_proxy_start:
+        outgoing->result = UV_ETIMEDOUT;
+        break;
+    default:
+        c->result = UV_ETIMEDOUT;
+        break;
+    }
 
     do_next(c->pn);
 }
@@ -505,16 +518,16 @@ static int do_handshake(PROXY_NODE *pn) {
 
     incoming = &pn->incoming;
 
-    ASSERT(incoming->rdstate == c_done);
-    ASSERT(incoming->wrstate == c_stop);
-    incoming->rdstate = c_stop;
-
     if ( incoming->result < 0 ) {
         notify_msg_out(1, "[%d] Handshake Read Error: %s",
                        pn->index, uv_strerror((int)incoming->result));
         new_state = do_kill(pn);
         BREAK_NOW;
     }
+
+    ASSERT(incoming->rdstate == c_done);
+    ASSERT(incoming->wrstate == c_stop);
+    incoming->rdstate = c_stop;
 
     /* Parser to get dest address */
     ret = handle_parse_addr(incoming);
@@ -537,6 +550,7 @@ static int do_handshake(PROXY_NODE *pn) {
                               pn->outgoing.peer.host,   /* Got from handle_parse_addr */
                               NULL,
                               &hints));
+    pn->outstanding++;
     conn_timer_reset(&pn->outgoing);
 
     new_state = s_req_lookup;
@@ -553,10 +567,6 @@ static int do_req_lookup(PROXY_NODE *pn) {
 
     incoming = &pn->incoming;
     outgoing = &pn->outgoing;
-    ASSERT(incoming->rdstate == c_stop);
-    ASSERT(incoming->wrstate == c_stop);
-    ASSERT(outgoing->rdstate == c_stop);
-    ASSERT(outgoing->wrstate == c_stop);
 
     if ( outgoing->result < 0 ) {
         notify_msg_out(1, "[%d] Lookup Error For %s : %s",
@@ -568,12 +578,19 @@ static int do_req_lookup(PROXY_NODE *pn) {
         BREAK_NOW;
     }
 
+    ASSERT(incoming->rdstate == c_stop);
+    ASSERT(incoming->wrstate == c_stop);
+    ASSERT(outgoing->rdstate == c_stop);
+    ASSERT(outgoing->wrstate == c_stop);
+
     ASSERT(outgoing->t.addr.sa_family == AF_INET ||
            outgoing->t.addr.sa_family == AF_INET6);
+
     CHECK(0 == uv_tcp_connect(&outgoing->t.connect_req,
                               &outgoing->handle.tcp,
                               &outgoing->t.addr,
                               conn_connect_done));
+    pn->outstanding++;
     conn_timer_reset(outgoing);
 
 BREAK_LABEL:
@@ -589,37 +606,8 @@ static int do_req_connect(PROXY_NODE *pn) {
 
     incoming = &pn->incoming;
     outgoing = &pn->outgoing;
-    ASSERT(incoming->rdstate == c_stop);
-    ASSERT(incoming->wrstate == c_stop);
-    ASSERT(outgoing->rdstate == c_stop);
-    ASSERT(outgoing->wrstate == c_stop);
 
-    if ( outgoing->result == 0 ) {
-        notify_connection_made(pn);
-
-        memset(pn->link_info, 0, sizeof(pn->link_info));
-        sprintf(pn->link_info, "%s:%d -> %s:%d",
-                incoming->peer.host,
-                incoming->peer.port,
-                outgoing->peer.host,
-                outgoing->peer.port);
-
-        if ( incoming->ss_buf.data_len == incoming->data_offset ) {
-            handle_free_mem(incoming);
-            conn_read(incoming);
-            conn_read(outgoing);
-            ret = s_proxy;
-        }
-        else {
-            CHECK(incoming->ss_buf.data_len > incoming->data_offset);
-            conn_write(
-                outgoing,
-                incoming->ss_buf.buf_base + incoming->data_offset,
-                (unsigned int)incoming->ss_buf.data_len - incoming->data_offset);
-            ret = s_proxy_start;
-        }
-    }
-    else {
+    if ( outgoing->result != 0 ) {
         notify_msg_out(
             1,
             "[%d] Connect to %s:%d failed: %s",
@@ -628,7 +616,39 @@ static int do_req_connect(PROXY_NODE *pn) {
             outgoing->peer.port,
             uv_strerror((int)outgoing->result));
         ret = do_kill(pn);
+        BREAK_NOW;
     }
+
+    ASSERT(incoming->rdstate == c_stop);
+    ASSERT(incoming->wrstate == c_stop);
+    ASSERT(outgoing->rdstate == c_stop);
+    ASSERT(outgoing->wrstate == c_stop);
+
+    notify_connection_made(pn);
+
+    memset(pn->link_info, 0, sizeof(pn->link_info));
+    sprintf(pn->link_info, "%s:%d -> %s:%d",
+            incoming->peer.host,
+            incoming->peer.port,
+            outgoing->peer.host,
+            outgoing->peer.port);
+
+    if ( incoming->ss_buf.data_len == incoming->data_offset ) {
+        handle_free_mem(incoming);
+        conn_read(incoming);
+        conn_read(outgoing);
+        ret = s_proxy;
+    }
+    else {
+        CHECK(incoming->ss_buf.data_len > incoming->data_offset);
+        conn_write(
+            outgoing,
+            incoming->ss_buf.buf_base + incoming->data_offset,
+            (unsigned int)incoming->ss_buf.data_len - incoming->data_offset);
+        ret = s_proxy_start;
+    }
+
+BREAK_LABEL:
 
     return ret;
 }
@@ -687,7 +707,7 @@ BREAK_LABEL:
 
 
 static int do_kill(PROXY_NODE *pn) {
-    int new_state;
+    int new_state = s_almost_dead_1;
 
     if ( pn->outstanding != 0 ) {
         /* Wait for uncomplete write operation */
@@ -700,18 +720,9 @@ static int do_kill(PROXY_NODE *pn) {
     }
 
 
-    if (pn->state >= s_almost_dead_0) {
+    if ( pn->state >= s_almost_dead_0 ) {
         new_state = pn->state;
         BREAK_NOW;
-    }
-
-    /* Try to cancel the request. The callback still runs but if the
-     * cancellation succeeded, it gets called with status=UV_ECANCELED.
-     */
-    new_state = s_almost_dead_1;
-    if (pn->state == s_req_lookup) {
-        new_state = s_almost_dead_0;
-        uv_cancel(&pn->outgoing.t.req);
     }
 
     conn_close(&pn->incoming);
